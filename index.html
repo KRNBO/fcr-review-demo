@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FCR 검토도우미 시연판</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--text:#1d2330;--muted:#5d6675;--line:#dfe3ea;--accent:#2c5fd6;
+  --red:#fde8e8;--redt:#a12020;--yel:#fff6d6;--yelt:#7a5a00;--ok:#e7f6ec;--okt:#1d6b3a}
+@media (prefers-color-scheme:dark){:root{--bg:#14171c;--card:#1d2128;--text:#e6e9ef;--muted:#9aa3b2;--line:#323844;
+  --accent:#7aa2ff;--red:#4a1f1f;--redt:#ffb3b3;--yel:#463c17;--yelt:#ffe08a;--ok:#1d3a28;--okt:#9be0b2}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.6 -apple-system,"Malgun Gothic","Apple SD Gothic Neo",sans-serif}
+main{max-width:960px;margin:0 auto;padding:24px 16px 48px}
+h1{font-size:22px;margin:0 0 4px}
+.sub{color:var(--muted);margin:0 0 20px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:18px;margin-bottom:16px}
+.drop{border:2px dashed var(--line);border-radius:10px;padding:22px;text-align:center}
+button,.btn{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:9px 14px;font-size:14px;cursor:pointer;margin:4px}
+button.ghost{background:transparent;color:var(--accent);border:1px solid var(--accent)}
+.sum{display:flex;gap:10px;flex-wrap:wrap}
+.pill{border-radius:8px;padding:10px 14px;min-width:110px}
+.pill b{display:block;font-size:22px}
+.r{background:var(--red);color:var(--redt)}.y{background:var(--yel);color:var(--yelt)}.g{background:var(--ok);color:var(--okt)}
+.tw{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:14px}
+th,td{border-bottom:1px solid var(--line);padding:7px 8px;text-align:left;vertical-align:top}
+th{color:var(--muted);font-weight:600;white-space:nowrap}
+td.n{white-space:nowrap}
+.note{color:var(--muted);font-size:13px}
+.err{color:var(--redt)}
+</style>
+</head>
+<body>
+<main>
+<h1>FCR 검토도우미 — 시연판</h1>
+<p class="sub">현장설계변경(FCR) 변경내역서 엑셀을 올리면 계산이 맞는지 검사하고, 틀린 곳의 위치를 보여 줍니다.</p>
+
+<div class="card">
+  <div class="drop">
+    <p><b>변경내역서 엑셀(.xlsx)을 고르십시오.</b></p>
+    <input type="file" id="file" accept=".xlsx,.xls,.xlsm">
+    <p class="note">또는 시험 파일로 바로 해 보기(가짜 자료):</p>
+    <button class="ghost" data-sample="정상_변경내역서.xlsx">정상 내역서</button>
+    <button class="ghost" data-sample="예외1_계산오류_변경내역서.xlsx">계산 오류 내역서</button>
+    <button class="ghost" data-sample="예외2_손상파일.xlsx">손상 파일</button>
+    <button class="ghost" data-sample="예외3_양식아님.xlsx">양식 아닌 엑셀</button>
+  </div>
+  <p class="note">* 파일은 이 브라우저 안에서만 읽고 어디에도 보내지 않습니다. AI를 쓰지 않고 정해진 계산 규칙으로만 검사합니다.
+  실제 프로그램은 내부 PC에서만 돌며, 이 시연판은 계산 검사 일부만 보여 줍니다.</p>
+</div>
+
+<div id="out"></div>
+
+<div class="card note">
+  <b>검사하는 것</b>: ① 금액 = 수량 × 단가(재료비·노무비·경비·합계, 당초·변경) ② 합계단가 = 재료비 + 노무비 + 경비
+  ③ 증감 수량 = 변경 − 당초 ④ 엑셀 오류 값(#REF! 등).<br>
+  <b>주의</b> = 계산이 맞지 않음, <b>확인</b> = 원문에서 확인할 것. 판단 보조이며 승인·반려는 검토자가 정합니다.
+</div>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const clean = v => String(v ?? "").replace(/\s+/g, "");
+const num = v => {
+  if (typeof v === "number") return v;
+  const t = String(v ?? "").replace(/,/g, "").trim();
+  return t !== "" && !isNaN(t) ? Number(t) : null;
+};
+const fmt = v => v == null ? "" : Number(v).toLocaleString("ko-KR", {maximumFractionDigits: 3});
+const close = (a, b) => Math.abs(a - b) <= Math.max(1, Math.abs(b) * 1e-6);
+const ERR = /^#(REF!|DIV\/0!|VALUE!|N\/A|NAME\?|NUM!|NULL!)$/;
+const PARTS = ["재료비", "노무비", "경비", "합계"];
+
+// 머리글 3줄(당초·변경·증감 / 수량·재료비… / 단가·금액)을 찾아 열 지도를 만든다
+function columnMap(rows) {
+  for (let i = 0; i < rows.length - 2; i++) {
+    const top = rows[i].map(clean);
+    if (!top.includes("당초") || !top.includes("변경")) continue;
+    const mid = rows[i + 1].map(clean), low = rows[i + 2].map(clean);
+    const width = Math.max(top.length, mid.length, low.length);
+    const map = {}; let g = "", p = "";
+    let name = top.findIndex(t => t === "공종" || t === "품명" || t === "비목");
+    for (let c = 0; c < width; c++) {
+      if (top[c]) { g = top[c]; p = ""; }
+      if (mid[c]) p = mid[c];
+      if (!["당초", "변경", "증감"].includes(g) || !p) continue;
+      const key = g + "|" + p + (low[c] ? "|" + low[c] : "");
+      if (!(key in map)) map[key] = c;
+    }
+    if (name < 0) name = 2;
+    return {start: i + 3, map, name, spec: name + 1};
+  }
+  return null;
+}
+
+function check(book) {
+  const found = [], counts = {주의: 0, 확인: 0, 정상: 0}; let items = 0, sheetsRead = 0;
+  for (const sheetName of book.SheetNames) {
+    const sheet = book.Sheets[sheetName], errs = {};
+    for (const ref in sheet) if (ref[0] !== "!" && sheet[ref].t === "e") {
+      const a = XLSX.utils.decode_cell(ref); (errs[a.r] = errs[a.r] || []).push(`${XLSX.utils.encode_col(a.c)}열에 ${sheet[ref].w || "오류"}`);
+    }
+    const rows = XLSX.utils.sheet_to_json(sheet, {header: 1, raw: true, defval: "", blankrows: true});
+    const cm = columnMap(rows);
+    if (!cm) continue;
+    sheetsRead++;
+    const m = cm.map, col = k => m[k], val = (r, k) => col(k) == null ? null : num(r[col(k)]);
+    for (let i = cm.start; i < rows.length; i++) {
+      const r = rows[i], item = clean(r[cm.name]) ? String(r[cm.name]).trim() + (r[cm.spec] ? " " + r[cm.spec] : "") : "";
+      if (!item) continue;
+      items++;
+      const where = `${sheetName} 시트 ${i + 1}행 · ${item}`;
+      const add = (grade, what, detail) => { counts[grade]++; found.push({grade, what, where, detail}); };
+      r.forEach((v, c) => { if (ERR.test(String(v).trim())) add("확인", "엑셀 오류 값", `${XLSX.utils.encode_col(c)}열에 ${v} — 원본 수식 확인`); });
+      (errs[i] || []).forEach(e => add("확인", "엑셀 오류 값", `${e} — 원본 수식 확인`));
+      for (const g of ["당초", "변경"]) {
+        const q = val(r, g + "|수량");
+        for (const p of PARTS) {
+          const u = val(r, `${g}|${p}|단가`), a = val(r, `${g}|${p}|금액`);
+          if (q == null || u == null || a == null) continue;
+          if (close(q * u, a)) counts.정상++;
+          else add("주의", `${g} ${p} 금액 = 수량 × 단가`, `${fmt(q)} × ${fmt(u)} = ${fmt(q * u)}인데 적힌 금액은 ${fmt(a)} (차이 ${fmt(a - q * u)})`);
+        }
+        const s = PARTS.slice(0, 3).map(p => val(r, `${g}|${p}|단가`)), t = val(r, `${g}|합계|단가`);
+        if (t != null && s.every(x => x != null)) {
+          const sum = s[0] + s[1] + s[2];
+          if (close(sum, t)) counts.정상++;
+          else add("주의", `${g} 합계단가 = 재료비 + 노무비 + 경비`, `${s.map(fmt).join(" + ")} = ${fmt(sum)}인데 적힌 합계단가는 ${fmt(t)}`);
+        }
+      }
+      const q0 = val(r, "당초|수량"), q1 = val(r, "변경|수량"), d = val(r, "증감|수량");
+      if (q0 != null && q1 != null && d != null) {
+        if (close(q1 - q0, d)) counts.정상++;
+        else add("주의", "증감 수량 = 변경 − 당초", `${fmt(q1)} − ${fmt(q0)} = ${fmt(q1 - q0)}인데 적힌 증감은 ${fmt(d)}`);
+      }
+    }
+  }
+  return {found, counts, items, sheetsRead};
+}
+
+function show(name, result, error) {
+  const out = $("#out");
+  if (error) {
+    out.innerHTML = `<div class="card"><h2>${esc(name)}</h2><p class="err"><b>읽기 실패</b> — 엑셀 파일로 열 수 없습니다(파일이 깨졌거나 엑셀이 아님).
+      검사를 멈추지 않고 '검사하지 못한 것'으로 남깁니다. 원본 파일을 다시 받아 올려 주십시오.</p></div>`;
+    return;
+  }
+  const {found, counts, items, sheetsRead} = result;
+  if (!sheetsRead) {
+    out.innerHTML = `<div class="card"><h2>${esc(name)}</h2><p><b>검사되지 않았습니다</b> — 변경내역서 양식(당초·변경·증감 머리글)을 찾지 못했습니다.
+      잘못 지적하지 않도록 판정을 내리지 않습니다. 사람이 원문으로 확인해 주십시오.</p></div>`;
+    return;
+  }
+  const rows = found.map(f => `<tr><td class="n"><span class="pill ${f.grade === "주의" ? "r" : "y"}" style="padding:2px 8px;min-width:0">${f.grade}</span></td>
+    <td>${esc(f.what)}</td><td>${esc(f.where)}</td><td>${esc(f.detail)}</td></tr>`).join("");
+  out.innerHTML = `<div class="card"><h2>${esc(name)}</h2>
+    <div class="sum"><div class="pill r">주의<b>${counts.주의}</b></div><div class="pill y">확인<b>${counts.확인}</b></div>
+    <div class="pill g">맞는 계산<b>${counts.정상}</b></div><div class="pill" style="border:1px solid var(--line)">비목<b>${items}</b></div></div>
+    ${found.length ? `<h3>지적 사항</h3><div class="tw"><table><tr><th>구분</th><th>검사</th><th>어디</th><th>내용</th></tr>${rows}</table></div>`
+      : `<p>계산이 맞지 않는 곳이 없습니다.</p>`}</div>`;
+}
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+
+function run(name, buffer) {
+  let book;
+  try {
+    const bytes = new Uint8Array(buffer);
+    if (!(bytes[0] === 0x50 && bytes[1] === 0x4b) && !(bytes[0] === 0xd0 && bytes[1] === 0xcf)) throw new Error("not excel");
+    book = XLSX.read(bytes, {type: "array"});
+  } catch (e) { return show(name, null, true); }
+  show(name, check(book));
+}
+$("#file").addEventListener("change", e => {
+  const f = e.target.files[0]; if (!f) return;
+  f.arrayBuffer().then(b => run(f.name, b));
+});
+document.querySelectorAll("[data-sample]").forEach(b => b.addEventListener("click", () => {
+  const n = b.dataset.sample;
+  fetch("test_data/" + encodeURIComponent(n)).then(r => r.arrayBuffer()).then(buf => run(n, buf));
+}));
+</script>
+</body>
+</html>
